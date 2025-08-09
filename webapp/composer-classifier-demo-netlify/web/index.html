@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Composer Classifier Demo</title>
+  <style>
+    :root {
+      --bg: #0f1220;
+      --card: #171a2b;
+      --accent: #8ea2ff;
+      --text: #e7e9f7;
+      --muted: #9aa0b6;
+      --ok: #40c463;
+      --warn: #f2c94c;
+      --bad: #ef6c6c;
+      --border: #262a43;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(1200px 600px at 70% -10%, #1b1f35, #0f1220);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Inter, "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    .app {
+      width: 100%;
+      max-width: 780px;
+    }
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.0));
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 24px;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.25);
+      backdrop-filter: blur(6px);
+    }
+    h1 {
+      font-size: 28px;
+      margin: 0 0 8px;
+      letter-spacing: 0.2px;
+    }
+    p.sub {
+      color: var(--muted);
+      margin-top: 0;
+      margin-bottom: 20px;
+    }
+    .dropzone {
+      border: 2px dashed #2d3356;
+      border-radius: 16px;
+      padding: 28px;
+      text-align: center;
+      transition: all 0.2s ease;
+      background: #13162a;
+      cursor: pointer;
+    }
+    .dropzone.dragover {
+      border-color: var(--accent);
+      background: #141a36;
+      transform: scale(1.01);
+    }
+    .dropzone input {
+      display: none;
+    }
+    .btn {
+      display: inline-block;
+      border: 1px solid var(--accent);
+      color: var(--text);
+      background: linear-gradient(180deg, #2a2f56, #1a1e3a);
+      padding: 10px 16px;
+      border-radius: 12px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+      cursor: pointer;
+      transition: transform 0.08s ease;
+    }
+    .btn:active { transform: translateY(1px); }
+    .row { display: flex; gap: 12px; align-items: center; justify-content: center; flex-wrap: wrap; }
+    .file-meta {
+      margin-top: 12px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+    .result-card {
+      margin-top: 18px;
+      background: #121627;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+    }
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      border: 1px solid var(--border);
+      background: #0f1429;
+      color: var(--muted);
+    }
+    .auth {
+      font-weight: 700;
+      margin-left: 8px;
+    }
+    .bars { margin-top: 10px; display: grid; gap: 8px; }
+    .bar-row { display: grid; grid-template-columns: 110px 1fr 52px; align-items: center; gap: 10px; }
+    .bar {
+      height: 10px;
+      background: #0d1123;
+      border-radius: 999px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .bar > span { display: block; height: 100%; background: var(--accent); width: 0%; transition: width 0.4s ease; }
+    .status { margin-top: 12px; color: var(--muted); font-size: 14px; }
+    .spinner {
+      width: 18px; height: 18px; border: 2px solid #2d3356; border-top-color: var(--accent); border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      display: inline-block; vertical-align: -4px; margin-right: 8px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    footer { margin-top: 18px; text-align: center; color: var(--muted); font-size: 12px; }
+    .hint { font-size: 13px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="card">
+      <h1>🎼 Composer Classifier — LSTM+CNN Demo</h1>
+      <p class="sub">Upload a <b>MIDI</b> file and this demo predicts the most likely composer among <b>Bach</b>, <b>Beethoven</b>, <b>Chopin</b>, and <b>Mozart</b>. The backend supports a real ONNX model; if none is present it uses a lightweight heuristic.</p>
+
+      <label class="dropzone" id="dropzone">
+        <input id="fileInput" type="file" accept=".mid,.midi" />
+        <div style="font-size:15px; line-height:1.5;">
+          <div style="font-size:34px; margin-bottom:6px;">⬆️ Drop MIDI here</div>
+          or click to select a file
+          <div class="hint" style="margin-top:6px;">Max a few MB. Only .mid / .midi files.</div>
+        </div>
+      </label>
+
+      <div class="row" style="margin-top:16px;">
+        <button class="btn" id="analyzeBtn" disabled>Analyze</button>
+        <span class="file-meta" id="fileMeta">No file selected.</span>
+      </div>
+
+      <div id="result" class="result-card" style="display:none;">
+        <div><span class="pill" id="engine">engine</span></div>
+        <h2 id="pred" style="margin:8px 0 4px;">Prediction</h2>
+        <div class="hint">Authenticity: <span class="auth" id="authenticity"></span></div>
+        <div class="bars" id="bars"></div>
+        <div class="status" id="status"></div>
+      </div>
+
+      <footer>Tip: To enable your real model, place <code>composer_classifier.onnx</code> under <code>models/</code> and restart the server.</footer>
+    </div>
+  </div>
+
+  <script>
+    const dz = document.getElementById('dropzone');
+    const fi = document.getElementById('fileInput');
+    const btn = document.getElementById('analyzeBtn');
+    const meta = document.getElementById('fileMeta');
+    const result = document.getElementById('result');
+    const pred = document.getElementById('pred');
+    const authenticity = document.getElementById('authenticity');
+    const bars = document.getElementById('bars');
+    const engine = document.getElementById('engine');
+    const statusEl = document.getElementById('status');
+
+    let file = null;
+
+    function setBars(probs) {
+      bars.innerHTML = '';
+      const order = ["Bach","Beethoven","Chopin","Mozart"];
+      order.forEach(name => {
+        const val = probs[name] ?? 0;
+        const row = document.createElement('div');
+        row.className = 'bar-row';
+        const label = document.createElement('div');
+        label.textContent = name;
+        const bar = document.createElement('div');
+        bar.className = 'bar';
+        const fill = document.createElement('span');
+        fill.style.width = Math.round(val*100) + '%';
+        bar.appendChild(fill);
+        const pct = document.createElement('div');
+        pct.textContent = (val*100).toFixed(1) + '%';
+        row.appendChild(label); row.appendChild(bar); row.appendChild(pct);
+        bars.appendChild(row);
+      });
+    }
+
+    dz.addEventListener('click', () => fi.click());
+    dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('dragover'); });
+    dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
+    dz.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dz.classList.remove('dragover');
+      if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+        file = e.dataTransfer.files[0];
+        fi.files = e.dataTransfer.files;
+        meta.textContent = file.name + ' (' + Math.round(file.size/1024) + ' KB)';
+        btn.disabled = false;
+      }
+    });
+    fi.addEventListener('change', (e) => {
+      file = e.target.files[0];
+      if (file) {
+        meta.textContent = file.name + ' (' + Math.round(file.size/1024) + ' KB)';
+        btn.disabled = false;
+      } else {
+        meta.textContent = 'No file selected.';
+        btn.disabled = true;
+      }
+    });
+
+    btn.addEventListener('click', async () => {
+      if (!file) return;
+      btn.disabled = true;
+      statusEl.innerHTML = '<span class="spinner"></span>Analyzing...';
+      result.style.display = 'block';
+      try {
+        const fd = new FormData();
+        fd.append('midi', file);
+        const res = await fetch('/api/predict', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Server error');
+
+        engine.textContent = 'Engine: ' + (data.engine || 'unknown');
+        pred.textContent = 'Prediction: ' + data.composer + ' (' + (data.confidence*100).toFixed(1) + '%)';
+        authenticity.textContent = data.authenticity || '—';
+        setBars(data.probabilities || {});
+        statusEl.textContent = 'Done.';
+      } catch (err) {
+        statusEl.textContent = 'Error: ' + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

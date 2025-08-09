@@ -1,0 +1,9 @@
+[build]
+  publish = "web"
+
+# Replace the 'to' URL with your backend URL (Render/Railway/Fly/etc.).
+[[redirects]]
+  from = "/api/*"
+  to = "https://YOUR-BACKEND-URL/:splat"
+  status = 200
+  force = true
