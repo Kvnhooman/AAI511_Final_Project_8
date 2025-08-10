@@ -133,7 +133,7 @@
       <p class="sub">Upload a <b>MIDI</b> file and this demo predicts the most likely composer among <b>Bach</b>, <b>Beethoven</b>, <b>Chopin</b>, and <b>Mozart</b>. The backend supports a real ONNX model; if none is present it uses a lightweight heuristic.</p>
 
       <label class="dropzone" id="dropzone">
-        <input id="fileInput" type="file" accept=".mid,.midi" />
+        <input id="fileInput" type="file" accept=".mid,.midi,.MID,.MIDI" />
         <div style="font-size:15px; line-height:1.5;">
           <div style="font-size:34px; margin-bottom:6px;">⬆️ Drop MIDI here</div>
           or click to select a file
@@ -170,6 +170,11 @@
     const engine = document.getElementById('engine');
     const statusEl = document.getElementById('status');
 
+    fi.addEventListener('click', () => {
+      // Ensure re-selecting the same file triggers 'change'
+      fi.value = '';
+    });
+
     let file = null;
 
     function setBars(probs) {
@@ -193,7 +198,11 @@
       });
     }
 
-    dz.addEventListener('click', () => fi.click());
+    dz.addEventListener('click', () => {
+      // Reset value so selecting the same file again still fires 'change'
+      fi.value = '';
+      fi.click();
+    });
     dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('dragover'); });
     dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
     dz.addEventListener('drop', (e) => {
