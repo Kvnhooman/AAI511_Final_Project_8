@@ -1,0 +1,14 @@
+{
+  "RUN_PREPROCESS": true,
+  "RUN_HYBRID_TRAINING": true,
+  "RUN_LSTM_TRAINING": true,
+  "KAGGLE_DATASET": "blanderbuss/midi-classic-music",
+  "ZIP_FILENAME": null,
+  "OUTPUT_DIR": "./processed_data",
+  "TARGET_COMPOSERS": [
+    "bach",
+    "beethoven",
+    "chopin",
+    "mozart"
+  ]
+}
