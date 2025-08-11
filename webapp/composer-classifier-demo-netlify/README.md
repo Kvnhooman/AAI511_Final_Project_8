@@ -1,6 +1,5 @@
 # Composer Classifier Demo (LSTM+CNN)
 
-A tiny Flask app + single-page UI to showcase composer prediction for MIDI files.
 Supports Bach / Beethoven / Chopin / Mozart.
 
 ## Quick Start
@@ -12,14 +11,8 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Open http://127.0.0.1:5000 in your browser and upload a MIDI file.
+Open https://authenticcomposers.netlify.app and upload a MIDI file.
 
-### Using your real model
-- Export your trained model to ONNX (single input feature vector).
-- Place it at: `models/composer_classifier.onnx` (relative to this project root).
-- Restart the server. The status pill will show `Engine: ONNX` when loaded.
-- Update `extract_features()` if your model expects a different feature set.
 
 ### Notes
-- If no ONNX model is found, the server runs a deterministic **heuristic demo** for probabilities.
-- Edit thresholds or labels in `backend/app.py` to match your training.
+This only works when you drag/drop your file (Not by pick the file and upload)
