@@ -1,217 +1,200 @@
-import io
-import os
-import math
-import tempfile
+import io, os, json, math, tempfile
 from typing import Dict, Tuple, List
 
 import numpy as np
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# Optional imports for real model inference
-ORT_AVAILABLE = False
+# ---------- Runtime deps ----------
+import pretty_midi
+
+ORT_AVAILABLE = True
 try:
     import onnxruntime as ort
-    ORT_AVAILABLE = True
 except Exception:
     ORT_AVAILABLE = False
 
-PM_AVAILABLE = True
-try:
-    import pretty_midi
-except Exception:
-    PM_AVAILABLE = False
+# ---------- Config ----------
+LABELS_FALLBACK = ["bach", "beethoven", "chopin", "mozart"]  # lowercase for consistency
+WINDOW_LEN = 50
+STRIDE = 1
+PITCH_START, PITCH_END = 21, 108  # inclusive (88 keys)
+NUM_PITCHES = PITCH_END - PITCH_START + 1
+BATCH = 64
 
-LABELS = ["Bach", "Beethoven", "Chopin", "Mozart"]
-
+# ---------- Flask ----------
 app = Flask(__name__, static_folder="../web", static_url_path="")
 CORS(app)
 
-def _softmax(x: np.ndarray) -> np.ndarray:
-    x = x - np.max(x)
+
+# ---------- Utilities ----------
+def softmax(x: np.ndarray) -> np.ndarray:
+    x = x - np.max(x, axis=-1, keepdims=True)
     e = np.exp(x)
-    return e / np.sum(e)
+    return e / np.sum(e, axis=-1, keepdims=True)
 
-def _time_weighted_polyphony(notes: List[Tuple[float, float]]) -> float:
-    # notes: list of (start, end)
-    if not notes:
-        return 0.0
-    events = []
-    for s, e in notes:
-        events.append((s, 1))
-        events.append((e, -1))
-    events.sort()
-    active = 0
-    prev_t = events[0][0]
-    total = 0.0
-    for t, delta in events:
-        dt = max(0.0, t - prev_t)
-        total += active * dt
-        active += delta
-        prev_t = t
-    duration = max(1e-6, events[-1][0] - events[0][0])
-    return total / duration
+def load_labels(model_dir: str) -> List[str]:
+    lp = os.path.join(model_dir, "labels.json")
+    if os.path.isfile(lp):
+        try:
+            with open(lp, "r") as f:
+                labs = json.load(f)
+            # normalize capitalization for UI
+            return [s.capitalize() for s in labs]
+        except Exception:
+            pass
+    return [s.capitalize() for s in LABELS_FALLBACK]
 
-def extract_features(midi_bytes: bytes) -> Dict[str, float]:
-    if not PM_AVAILABLE:
-        raise RuntimeError("pretty_midi is not installed. Please install dependencies.")
+def midi_to_events(midi_bytes: bytes) -> np.ndarray:
+    """
+    Return (N,3) float32: [pitch, step, duration], step = time since previous onset.
+    """
     with tempfile.NamedTemporaryFile(suffix=".mid", delete=True) as tmp:
         tmp.write(midi_bytes)
         tmp.flush()
         pm = pretty_midi.PrettyMIDI(tmp.name)
 
-    # Collect notes
     notes = []
-    velocities = []
-    pitch_classes = []
     for inst in pm.instruments:
         for n in inst.notes:
-            notes.append((n.start, n.end, n.pitch, n.velocity))
-            velocities.append(n.velocity)
-            pitch_classes.append(n.pitch % 12)
+            notes.append((n.start, n.end, n.pitch))
+    if not notes:
+        return None
+    notes.sort(key=lambda x: x[0])
 
-    duration = pm.get_end_time() if pm.get_end_time() > 0 else 1e-6
-    n_notes = len(notes)
-    note_density = n_notes / duration
+    ev = []
+    prev_onset = notes[0][0]
+    for start, end, pitch in notes:
+        step = max(0.0, start - prev_onset)
+        dur = max(0.0, end - start)
+        ev.append([float(pitch), float(step), float(dur)])
+        prev_onset = start
+    return np.asarray(ev, dtype=np.float32)
 
-    # Tempo statistics
-    try:
-        t_changes, tempi = pm.get_tempo_changes()
-        if len(tempi) == 0:
-            tempi = np.array([pm.estimate_tempo()])
-        tempo_mean = float(np.mean(tempi))
-        tempo_std = float(np.std(tempi))
-    except Exception:
-        tempo_mean = float(pm.estimate_tempo()) if hasattr(pm, "estimate_tempo") else 120.0
-        tempo_std = 0.0
-
-    # Velocity stats
-    if len(velocities) == 0:
-        vel_mean, vel_std = 0.0, 0.0
-    else:
-        vel_mean = float(np.mean(velocities))
-        vel_std = float(np.std(velocities))
-
-    # Pitch class histogram (12)
-    if len(pitch_classes) == 0:
-        pch = np.zeros(12, dtype=float)
-    else:
-        pch = np.bincount(np.array(pitch_classes), minlength=12).astype(float)
-        if pch.sum() > 0:
-            pch /= pch.sum()
-
-    # Polyphony (time-weighted avg number of simultaneous notes)
-    polyphony = _time_weighted_polyphony([(s, e) for (s, e, _, _) in notes])
-
-    feats = {
-        "duration_s": float(duration),
-        "notes": int(n_notes),
-        "note_density": float(note_density),
-        "tempo_mean": float(tempo_mean),
-        "tempo_std": float(tempo_std),
-        "velocity_mean": float(vel_mean),
-        "velocity_std": float(vel_std),
-        "polyphony": float(polyphony),
-    }
-    for i in range(12):
-        feats[f"pc_{i}"] = float(pch[i])
-    return feats
-
-class DemoHeuristicModel:
+def windows_from_events(ev: np.ndarray, win=WINDOW_LEN, stride=STRIDE) -> np.ndarray:
     """
-    Lightweight fallback when no real model is provided.
-    Produces a stable, deterministic score from features.
+    Slice (N,3) into windows -> (num_windows, win, 3)
     """
-    def predict_proba(self, x: np.ndarray) -> np.ndarray:
-        # x expected shape (D,)
-        # Simple crafted logits for showcase
-        # Emphasize baroque polyphony for Bach, dynamic variance for Beethoven,
-        # rubato/tempo variance & chromatic use for Chopin, diatonic simplicity for Mozart.
-        D = x.shape[0]
-        # Index mapping (keep in sync with extract_features)
-        idx = {
-            "note_density": 2,
-            "tempo_mean": 3,
-            "tempo_std": 4,
-            "velocity_std": 6,
-            "polyphony": 7,
-            # pitch classes start at 8 -> 19
-            "pc_start": 8
-        }
-        pc = x[idx["pc_start"]:idx["pc_start"]+12]
-        # Diatonic emphasis: C, D, E, F, G, A, B -> 0,2,4,5,7,9,11
-        diatonic = pc[[0,2,4,5,7,9,11]].sum()
-        chromatic = pc.sum() - diatonic
+    if ev is None or len(ev) < win:
+        return np.empty((0, win, 3), dtype=np.float32)
+    n = 1 + (len(ev) - win) // stride
+    out = np.empty((n, win, 3), dtype=np.float32)
+    j = 0
+    for i in range(0, len(ev) - win + 1, stride):
+        out[j] = ev[i:i+win]
+        j += 1
+    return out
 
-        logits = np.zeros(4, dtype=float)
-        # Bach
-        logits[0] = 2.2*x[idx["polyphony"]] + 1.5*x[idx["note_density"]] + 0.3*diatonic - 0.2*x[idx["tempo_std"]]
-        # Beethoven
-        logits[1] = 1.8*x[idx["velocity_std"]] + 1.7*x[idx["tempo_std"]] + 0.5*x[idx["note_density"]]
-        # Chopin
-        logits[2] = 1.9*chromatic + 1.2*x[idx["tempo_std"]] + 0.4*(x[idx["velocity_std"]])
-        # Mozart
-        logits[3] = 2.0*diatonic + 0.8*(1.0 - x[idx["polyphony"]]) + 0.2*(1.0 - chromatic)
+def seq_to_pianoroll_fast(seq: np.ndarray) -> np.ndarray:
+    """
+    seq: (T,3) where seq[:,0]=pitch -> return (1,88,T)
+    """
+    T = seq.shape[0]
+    pr = np.zeros((1, NUM_PITCHES, T), dtype=np.float32)
+    pitches = seq[:, 0].astype(np.int16)
+    idx = pitches - PITCH_START
+    t_idx = np.arange(T, dtype=np.int32)
+    mask = (idx >= 0) & (idx < NUM_PITCHES)
+    pr[0, idx[mask], t_idx[mask]] = 1.0
+    return pr
 
-        # Normalize and softmax
-        probs = _softmax(logits)
-        return probs
-
-class InferenceEngine:
+# ---------- Inference Engine ----------
+class Engine:
     def __init__(self):
         self.mode = "DEMO"
-        self.labels = LABELS
+        self.labels = [s.capitalize() for s in LABELS_FALLBACK]
         self.ort_sess = None
+        self.is_hybrid = False  # False = LSTM-only, True = Hybrid
 
-        model_path = os.environ.get("ONNX_MODEL_PATH", os.path.join(os.path.dirname(__file__), "../models/composer_classifier.onnx"))
+        model_path = os.environ.get(
+            "ONNX_MODEL_PATH",
+            os.path.join(os.path.dirname(__file__), "../models/composer_classifier.onnx"),
+        )
+        model_dir = os.path.dirname(model_path)
+
         if ORT_AVAILABLE and os.path.isfile(model_path):
             try:
                 self.ort_sess = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+                # detect model type from inputs
+                inps = [i.name for i in self.ort_sess.get_inputs()]
+                self.is_hybrid = (len(inps) >= 2)  # expect ["x_lstm","x_cnn"] for hybrid
                 self.mode = "ONNX"
-                print(f"[INFO] Loaded ONNX model from {model_path}")
+                self.labels = load_labels(model_dir)
+                print(f"[INFO] ONNX loaded: {model_path} | Hybrid={self.is_hybrid} | Labels={self.labels}")
             except Exception as e:
-                print(f"[WARN] Failed to load ONNX model ({e}). Falling back to DEMO.")
+                print(f"[WARN] ONNX load failed: {e}; falling back to DEMO")
 
         if self.mode == "DEMO":
-            print("[INFO] Running in DEMO mode (heuristic). Place an ONNX model at ../models/composer_classifier.onnx to enable real inference.")
-            self.demo = DemoHeuristicModel()
+            print("[INFO] DEMO engine active (no ONNX).")
 
-    def predict(self, features: Dict[str, float]) -> Dict[str, float]:
-        # Arrange feature vector in a fixed order
-        feature_keys = [
-            "duration_s","notes","note_density","tempo_mean","tempo_std","velocity_mean","velocity_std","polyphony",
-            *[f"pc_{i}" for i in range(12)]
-        ]
-        x = np.array([features[k] for k in feature_keys], dtype=np.float32)
+    def predict_probs(self, midi_bytes: bytes) -> Dict[str, float]:
+        # Build windows
+        ev = midi_to_events(midi_bytes)
+        X_l = windows_from_events(ev, WINDOW_LEN, STRIDE)  # (Nw, 50, 3)
+        if X_l.shape[0] == 0:
+            raise ValueError("Not enough notes to form a 50-note window.")
 
         if self.mode == "ONNX" and self.ort_sess is not None:
-            try:
-                # Assumes a single input and single output with probabilities or logits
-                input_name = self.ort_sess.get_inputs()[0].name
-                out = self.ort_sess.run(None, {input_name: x.reshape(1, -1)})[0].squeeze()
-                # If output looks like logits, softmax them
-                if out.ndim == 1:
-                    if not np.all((0.0 <= out) & (out <= 1.0)) or abs(out.sum() - 1.0) > 1e-3:
-                        out = _softmax(out)
-                    probs = out
-                else:
-                    probs = out[0]
-            except Exception as e:
-                print(f"[WARN] ONNX inference failed: {e}. Falling back to DEMO.")
-                probs = self.demo.predict_proba(x)
+            # Run in batches, average logits
+            logits_all = []
+            if self.is_hybrid:
+                # Build matching pianorolls
+                X_c = np.stack([seq_to_pianoroll_fast(seq) for seq in X_l], axis=0)  # (Nw,1,88,50)
+                for i in range(0, X_l.shape[0], BATCH):
+                    xb_l = X_l[i:i+BATCH].astype(np.float32)          # (B,50,3)
+                    xb_c = X_c[i:i+BATCH].astype(np.float32)          # (B,1,88,50)
+                    feeds = {}
+                    # be flexible with input names
+                    inp0 = self.ort_sess.get_inputs()[0].name
+                    feeds[inp0] = xb_l
+                    if len(self.ort_sess.get_inputs()) >= 2:
+                        inp1 = self.ort_sess.get_inputs()[1].name
+                        feeds[inp1] = xb_c
+                    out = self.ort_sess.run(None, feeds)[0]           # (B,C) logits or probs
+                    logits_all.append(out.astype(np.float32))
+            else:
+                for i in range(0, X_l.shape[0], BATCH):
+                    xb_l = X_l[i:i+BATCH].astype(np.float32)          # (B,50,3)
+                    feeds = { self.ort_sess.get_inputs()[0].name: xb_l }
+                    out = self.ort_sess.run(None, feeds)[0]           # (B,C)
+                    logits_all.append(out.astype(np.float32))
+
+            logits = np.concatenate(logits_all, axis=0)               # (Nw,C)
+            # If they are already probs (0-1 and ~sum=1), keep; else softmax
+            row_sums = logits.sum(axis=1, keepdims=True)
+            if np.any((logits < 0) | (logits > 1)) or np.any(np.abs(row_sums - 1) > 1e-3):
+                probs_w = softmax(logits)                             # (Nw,C)
+            else:
+                probs_w = logits
+            probs = probs_w.mean(axis=0)                               # (C,)
         else:
-            probs = self.demo.predict_proba(x)
+            # DEMO fallback: simple hand-crafted signal from windows
+            # Use polyphony proxy via pianoroll occupancy & step variability
+            def demo_scores(seq: np.ndarray) -> np.ndarray:
+                pr = seq_to_pianoroll_fast(seq)                       # (1,88,50)
+                poly = (pr.sum(axis=1) > 1e-6).mean()                 # fraction of frames with any notes
+                step_std = np.std(seq[:, 1]) if seq.shape[0] else 0.0
+                dur_std  = np.std(seq[:, 2]) if seq.shape[0] else 0.0
+                logits = np.array([
+                    1.8*poly + 0.2*(1-step_std),     # Bach-ish polyphony
+                    1.5*dur_std + 1.2*step_std,      # Beethoven dynamics-ish
+                    1.4*step_std + 0.6*dur_std,      # Chopin rubato-ish
+                    1.7*(1-poly) + 0.3*(1-step_std), # Mozart simpler textures
+                ], dtype=np.float32)
+                return logits
+            L = np.stack([demo_scores(s) for s in X_l], axis=0)       # (Nw,4)
+            probs = softmax(L).mean(axis=0)
 
-        probs = probs.astype(float)
+        # Normalize and map to labels
+        probs = probs.astype(np.float64)
         probs = probs / (probs.sum() + 1e-9)
-        result = {label: float(p) for label, p in zip(self.labels, probs)}
-        return result
+        return {label: float(p) for label, p in zip(self.labels, probs)}
 
-ENGINE = InferenceEngine()
+ENGINE = Engine()
 
+# ---------- Routes ----------
 @app.route("/")
 def root():
-    # Serve the static index.html
     return app.send_static_file("index.html")
 
 @app.route("/api/predict", methods=["POST"])
@@ -222,29 +205,29 @@ def predict():
     if f.filename == "":
         return jsonify({"error": "Empty filename."}), 400
     data = f.read()
-    if len(data) == 0:
+    if not data:
         return jsonify({"error": "Empty file."}), 400
+    if len(data) > 10 * 1024 * 1024:
+        return jsonify({"error": "File too large (>10MB)."}), 413
 
     try:
-        feats = extract_features(data)
-        probs = ENGINE.predict(feats)
-        # Authenticity heuristic based on confidence
-        best_label = max(probs, key=probs.get)
-        confidence = float(probs[best_label])
-        if confidence >= 0.75:
+        probs = ENGINE.predict_probs(data)
+        best = max(probs, key=probs.get)
+        conf = float(probs[best])
+        if conf >= 0.75:
             authenticity = "Likely authentic"
-        elif confidence >= 0.55:
+        elif conf >= 0.55:
             authenticity = "Possibly authentic"
         else:
             authenticity = "Uncertain / possibly misattributed"
 
         return jsonify({
-            "composer": best_label,
-            "confidence": confidence,
+            "composer": best,
+            "confidence": conf,
             "probabilities": probs,
             "authenticity": authenticity,
-            "features": feats,
-            "engine": ENGINE.mode
+            "engine": ENGINE.mode,
+            "hybrid": ENGINE.is_hybrid
         })
     except Exception as e:
         return jsonify({"error": f"Failed to process MIDI: {e}"}), 500
