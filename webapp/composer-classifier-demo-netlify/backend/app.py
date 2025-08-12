@@ -26,7 +26,6 @@ BATCH = 64
 app = Flask(__name__, static_folder="../web", static_url_path="")
 CORS(app)
 
-
 # ---------- Utilities ----------
 def softmax(x: np.ndarray) -> np.ndarray:
     x = x - np.max(x, axis=-1, keepdims=True)
