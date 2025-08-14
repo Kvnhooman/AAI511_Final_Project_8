@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Composer Classifier Demo</title>
+  <title>AuthenticComposers — Composer Attribution</title>
   <style>
     :root {
       --bg: #0f1220;
@@ -129,14 +129,14 @@
 <body>
   <div class="app">
     <div class="card">
-      <h1>🎼 Composer Classifier — LSTM+CNN Demo</h1>
-      <p class="sub">Upload a <b>MIDI</b> file and this demo predicts the most likely composer among <b>Bach</b>, <b>Beethoven</b>, <b>Chopin</b>, and <b>Mozart</b>. The backend supports a real ONNX model; if none is present it uses a lightweight heuristic.</p>
+      <h1>🎼 AuthenticComposers — Classical Composer Attribution</h1>
+      <p class="sub">Upload a <b>MIDI</b> score to estimate the most likely composer among <b>Bach</b>, <b>Beethoven</b>, <b>Chopin</b>, and <b>Mozart</b>. The backend runs our LSTM + CNN classifier trained on a large corpus of annotated classical MIDI scores (thousands of pieces). It returns class probabilities and a confidence‑based authenticity signal.</p>
 
       <label class="dropzone" id="dropzone">
         <input id="fileInput" type="file" accept=".mid,.midi,.MID,.MIDI" />
         <div style="font-size:15px; line-height:1.5;">
-          <div style="font-size:34px; margin-bottom:6px;">⬆️ Drag/Drop MIDI here</div>
-          <div class="hint" style="margin-top:6px;">Max a few MB. Only .mid / .midi files.</div>
+          <div style="font-size:34px; margin-bottom:6px;">⬆️ Drag & drop a MIDI file</div>
+          <div class="hint" style="margin-top:6px;">Max 10 MB · .mid / .midi only · Files are processed in memory and not stored.</div>
         </div>
       </label>
 
@@ -152,6 +152,10 @@
         <div class="bars" id="bars"></div>
         <div class="status" id="status"></div>
       </div>
+
+      <footer>
+        <b>About</b> — This is a lightweight portfolio demo of a composer‑attribution system. The production backend can load our exported ONNX model; when present, the “Engine” pill shows <code>ONNX</code>. Otherwise a demo heuristic is used for illustration.
+      </footer>
 
     </div>
   </div>
